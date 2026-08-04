@@ -15,7 +15,7 @@ app = FastAPI()
 # CẤU HÌNH HỆ THỐNG & API ENVIRONMENT SETTINGS
 # ==========================================
 API_KEY_SHEET_ID = "1wzgeUWKlXe-QU-rDZLaLjIQxeXreNvbm3Fi88UZjXWM"
-DATA_SHEET_ID = "1PeJmm8QvG85pAnlw8-NFco7MC-mxIc2wVncY6aCiifo"
+DATA_SHEET_ID = "1YrgKGSUsPTBMxm39qeM8QRxalhfLQD3Zg8gozx6KTgM"
 CX_LINKEDIN = "a6be6e8ccdb58403b"
 SECRET_TOKEN = "MySuperSecretToken123"  # Token xác thực khi gọi API từ cron-job.org
 
