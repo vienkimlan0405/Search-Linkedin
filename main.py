@@ -8,6 +8,7 @@ import urllib.parse
 import gspread
 from google import genai
 from fastapi import FastAPI, BackgroundTasks, HTTPException
+from fastapi.responses import JSONResponse
 
 app = FastAPI()
 
@@ -17,7 +18,10 @@ app = FastAPI()
 API_KEY_SHEET_ID = "1wzgeUWKlXe-QU-rDZLaLjIQxeXreNvbm3Fi88UZjXWM"
 DATA_SHEET_ID = "1YrgKGSUsPTBMxm39qeM8QRxalhfLQD3Zg8gozx6KTgM"
 CX_LINKEDIN = "a6be6e8ccdb58403b"
-SECRET_TOKEN = "MySuperSecretToken123"  # Token xác thực khi gọi API từ cron-job.org
+SECRET_TOKEN = "MySuperSecretToken123"
+
+# Giới hạn số dòng xử lý trong MỖI LẦN CHẠY CRONJOB để tránh quá tải
+BATCH_SIZE = 15  
 
 CHECK_DELAY = 0.5
 SEARCH_DELAY = 1.5
@@ -232,7 +236,6 @@ def get_location_gemini(ceo_name, company, linkedin_url, gemini_mgr):
     return "Error"
 
 def get_company_location_gemini(company, gemini_mgr):
-    """Hàm bổ sung: Tra cứu trụ sở chính của công ty (Company HQ Location)"""
     prompt = (
         f"Where is the global headquarters of the company '{company}' located? "
         f"Reply with ONLY City, State/Country (e.g. 'Austin, TX' or 'London, UK'). "
@@ -296,13 +299,16 @@ def run_automation_logic():
             col_e = row[4].strip() if len(row) > 4 else ""
             col_f = row[5].strip() if len(row) > 5 else ""
 
-            # Chỉ chạy khi Cột A có tên công ty VÀ Cột E, F còn trống
+            # Chỉ lấy các dòng có tên công ty VÀ Cột E, F còn trống
             if company and col_e == "" and col_f == "":
                 todo_search.append({"idx": i + 2, "name": company})
 
-        if todo_search:
-            print(f"🚀 Xử lý {len(todo_search)} dòng cần tìm CEO Profile...")
-            for task in todo_search:
+        # CẮT DÂN SÁCH THEO BATCH_SIZE (Giới hạn tối đa 15 dòng/lần chạy)
+        todo_search_batch = todo_search[:BATCH_SIZE]
+
+        if todo_search_batch:
+            print(f"🚀 Xử lý đợt này {len(todo_search_batch)}/{len(todo_search)} dòng cần tìm CEO Profile...")
+            for task in todo_search_batch:
                 row_idx = task["idx"]
                 company_query = task["name"]
 
@@ -366,6 +372,7 @@ def run_automation_logic():
         print("\n⏳ [PHẦN 2] Kiểm tra Vị trí CEO (Cột G)...")
         all_rows_updated = data_sheet.get_all_values()
         
+        todo_location = []
         for i, row in enumerate(all_rows_updated[1:]):
             row_idx = i + 2
             company = row[0].strip() if len(row) > 0 else ""
@@ -375,31 +382,49 @@ def run_automation_logic():
             location_filled = len(row) > 6 and row[6].strip()
 
             if is_high_confidence(confidence_status) and not location_filled:
-                if not ceo_name:
-                    data_sheet.update(range_name=f"G{row_idx}", values=[["-"]])
-                    continue
+                todo_location.append({
+                    "row_idx": row_idx,
+                    "company": company,
+                    "linkedin_url": linkedin_url,
+                    "ceo_name": ceo_name
+                })
 
-                location = get_location_gemini(ceo_name, company, linkedin_url, gemini_key_mgr)
-                data_sheet.update(range_name=f"G{row_idx}", values=[[location]])
-                print(f" 📍 [{row_idx}] Updated CEO Location (G): {location}")
-                sleep_with_jitter()
+        # CẮT DANH SÁCH LOCATION THEO BATCH
+        todo_location_batch = todo_location[:BATCH_SIZE]
+        for item in todo_location_batch:
+            row_idx = item["row_idx"]
+            if not item["ceo_name"]:
+                data_sheet.update(range_name=f"G{row_idx}", values=[["-"]])
+                continue
 
-        # 3. BƯỚC 3: QUÉT TÌM VỊ TRÍ CÔNG TY (CỘT H TRỐNG - COMPANY LOCATION)
+            location = get_location_gemini(item["ceo_name"], item["company"], item["linkedin_url"], gemini_key_mgr)
+            data_sheet.update(range_name=f"G{row_idx}", values=[[location]])
+            print(f" 📍 [{row_idx}] Updated CEO Location (G): {location}")
+            sleep_with_jitter()
+
+        # 3. BƯỚC 3: QUÉT TÌM VỊ TRÍ CÔNG TY (CỘT H TRỐNG)
         print("\n⏳ [PHẦN 3] Kiểm tra Vị trí Công ty / HQ Location (Cột H)...")
         all_rows_latest = data_sheet.get_all_values()
         
+        todo_hq = []
         for i, row in enumerate(all_rows_latest[1:]):
             row_idx = i + 2
             company = row[0].strip() if len(row) > 0 else ""
             comp_loc_filled = len(row) > 7 and row[7].strip()
 
             if company and not comp_loc_filled:
-                comp_location = get_company_location_gemini(company, gemini_key_mgr)
-                data_sheet.update(range_name=f"H{row_idx}", values=[[comp_location]])
-                print(f" 🏢 [{row_idx}] Updated Company HQ Location (H): {comp_location}")
-                sleep_with_jitter()
+                todo_hq.append({"row_idx": row_idx, "company": company})
 
-        print("\n🏁 HOÀN THÀNH TOÀN BỘ TIẾN TRÌNH AUTOMATION.")
+        # CẮT DANH SÁCH HQ THEO BATCH
+        todo_hq_batch = todo_hq[:BATCH_SIZE]
+        for item in todo_hq_batch:
+            row_idx = item["row_idx"]
+            comp_location = get_company_location_gemini(item["company"], gemini_key_mgr)
+            data_sheet.update(range_name=f"H{row_idx}", values=[[comp_location]])
+            print(f" 🏢 [{row_idx}] Updated Company HQ Location (H): {comp_location}")
+            sleep_with_jitter()
+
+        print("\n🏁 HOÀN THÀNH ĐỢT XỬ LÝ AUTOMATION BATCH.")
 
     except Exception as general_err:
         print(f"❌ Tiến trình gặp lỗi nghiêm trọng: {general_err}")
@@ -409,12 +434,15 @@ def run_automation_logic():
 # ==========================================
 @app.get("/")
 def home():
-    return {"status": "Service is running!"}
+    return JSONResponse(content={"status": "Service is running!"}, status_code=200)
 
 @app.get("/run-job")
 def trigger_job(background_tasks: BackgroundTasks, token: str = ""):
     if token != SECRET_TOKEN:
         raise HTTPException(status_code=403, detail="Unauthorized")
 
+    # Kích hoạt task chạy nền ngầm
     background_tasks.add_task(run_automation_logic)
-    return {"message": "Job successfully triggered in background!"}
+    
+    # Trả về JSONResponse tối giản siêu nhẹ ngay lập tức cho cron-job.org
+    return JSONResponse(content={"status": "ok", "message": "Job queued successfully"}, status_code=200)
