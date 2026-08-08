@@ -8,7 +8,7 @@ import urllib.parse
 import gspread
 from google import genai
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-from fastapi.responses import JSONResponse
+
 
 app = FastAPI()
 
@@ -18,10 +18,10 @@ app = FastAPI()
 API_KEY_SHEET_ID = "1wzgeUWKlXe-QU-rDZLaLjIQxeXreNvbm3Fi88UZjXWM"
 DATA_SHEET_ID = "1YrgKGSUsPTBMxm39qeM8QRxalhfLQD3Zg8gozx6KTgM"
 CX_LINKEDIN = "a6be6e8ccdb58403b"
-SECRET_TOKEN = "MySuperSecretToken123"
+SECRET_TOKEN = "MySuperSecretToken123"  # Token xác thực khi gọi API từ cron-job.org
 
-# Giới hạn số dòng xử lý trong MỖI LẦN CHẠY CRONJOB để tránh quá tải
-BATCH_SIZE = 15  
+
+
 
 CHECK_DELAY = 0.5
 SEARCH_DELAY = 1.5
@@ -29,131 +29,131 @@ GEMINI_DELAY_BASE = 6.0
 GEMINI_DELAY_JITTER = 2.5
 
 def sleep_with_jitter(base=GEMINI_DELAY_BASE, jitter=GEMINI_DELAY_JITTER):
-    time.sleep(base + random.uniform(0, jitter))
+    time.sleep(base + random.uniform(0, jitter))
 
 # ==========================================
 # HÀM KHỞI TẠO GSPREAD TỪ BIẾN MÔI TRƯỜNG
 # ==========================================
 def get_gspread_client():
-    service_account_info = os.getenv("SERVICE_ACCOUNT_JSON")
-    if service_account_info:
-        try:
-            creds_dict = json.loads(service_account_info)
-            return gspread.service_account_from_dict(creds_dict)
-        except Exception as e:
-            print(f"❌ Lỗi parse SERVICE_ACCOUNT_JSON từ môi trường: {e}")
-            raise e
-    else:
-        print("⚠️ Không thấy SERVICE_ACCOUNT_JSON trong môi trường, thử tìm file service_account.json local...")
-        return gspread.service_account(filename="service_account.json")
+    service_account_info = os.getenv("SERVICE_ACCOUNT_JSON")
+    if service_account_info:
+        try:
+            creds_dict = json.loads(service_account_info)
+            return gspread.service_account_from_dict(creds_dict)
+        except Exception as e:
+            print(f"❌ Lỗi parse SERVICE_ACCOUNT_JSON từ môi trường: {e}")
+            raise e
+    else:
+        print("⚠️ Không thấy SERVICE_ACCOUNT_JSON trong môi trường, thử tìm file service_account.json local...")
+        return gspread.service_account(filename="service_account.json")
 
 # ==========================================
 # CLASS QUẢN LÝ KEY ROTATION (ĐA TAB)
 # ==========================================
 class MultiTabKeyManager:
-    def __init__(self, sheet, key_type="KEY"):
-        self._sheet = sheet
-        self._type = key_type
-        self._keys = []
-        self._idx = 0
-        self._clients = {}
+    def __init__(self, sheet, key_type="KEY"):
+        self._sheet = sheet
+        self._type = key_type
+        self._keys = []
+        self._idx = 0
+        self._clients = {}
 
-    def load(self):
-        rows = self._sheet.get_all_values()
-        self._keys = []
-        for i, r in enumerate(rows[3:]):
-            row_num = i + 4
-            if r and r[0].strip():
-                status = r[1].strip() if len(r) > 1 else ""
-                if status in ["Mã API hết lượt", "API het luot", "Key loi (401)"]:
-                    continue
-                self._keys.append({"key": r[0].strip(), "row": row_num})
-        print(f"📊 [{self._type}] Đã nạp {len(self._keys)} key khả dụng từ tab '{self._sheet.title}'.")
+    def load(self):
+        rows = self._sheet.get_all_values()
+        self._keys = []
+        for i, r in enumerate(rows[3:]):
+            row_num = i + 4
+            if r and r[0].strip():
+                status = r[1].strip() if len(r) > 1 else ""
+                if status in ["Mã API hết lượt", "API het luot", "Key loi (401)"]:
+                    continue
+                self._keys.append({"key": r[0].strip(), "row": row_num})
+        print(f"📊 [{self._type}] Đã nạp {len(self._keys)} key khả dụng từ tab '{self._sheet.title}'.")
 
-    def current(self):
-        return self._keys[self._idx] if self._idx < len(self._keys) else None
+    def current(self):
+        return self._keys[self._idx] if self._idx < len(self._keys) else None
 
-    def current_key(self):
-        item = self.current()
-        return item["key"] if item else None
+    def current_key(self):
+        item = self.current()
+        return item["key"] if item else None
 
-    def get_client(self):
-        key = self.current_key()
-        if key is None:
-            return None
-        if key not in self._clients:
-            self._clients[key] = genai.Client(api_key=key)
-        return self._clients[key]
+    def get_client(self):
+        key = self.current_key()
+        if key is None:
+            return None
+        if key not in self._clients:
+            self._clients[key] = genai.Client(api_key=key)
+        return self._clients[key]
 
-    def exhaust(self):
-        if self._idx < len(self._keys):
-            self._mark(self._keys[self._idx]["row"], "429")
-            self._idx += 1
+    def exhaust(self):
+        if self._idx < len(self._keys):
+            self._mark(self._keys[self._idx]["row"], "429")
+            self._idx += 1
 
-    def invalidate(self):
-        if self._idx < len(self._keys):
-            self._mark(self._keys[self._idx]["row"], "401")
-            self._idx += 1
+    def invalidate(self):
+        if self._idx < len(self._keys):
+            self._mark(self._keys[self._idx]["row"], "401")
+            self._idx += 1
 
-    def _mark(self, row, kind):
-        msg = "Key loi (401)" if kind == "401" else "API het luot"
-        color = (
-            {"red": 0.97, "green": 0.83, "blue": 0.12} if kind == "401"
-            else {"red": 1.0, "green": 0.7, "blue": 0.7}
-        )
-        self._sheet.update(range_name=f"B{row}", values=[[msg]])
-        self._sheet.format(f"A{row}", {"backgroundColor": color})
-        print(f"🛑 [{self._type}] Hàng {row} đánh dấu: {msg}")
+    def _mark(self, row, kind):
+        msg = "Key loi (401)" if kind == "401" else "API het luot"
+        color = (
+            {"red": 0.97, "green": 0.83, "blue": 0.12} if kind == "401"
+            else {"red": 1.0, "green": 0.7, "blue": 0.7}
+        )
+        self._sheet.update(range_name=f"B{row}", values=[[msg]])
+        self._sheet.format(f"A{row}", {"backgroundColor": color})
+        print(f"🛑 [{self._type}] Hàng {row} đánh dấu: {msg}")
 
 # ==========================================
 # BƯỚC 0: AUDIT DẠO API KEYS (CUSTOM SEARCH)
 # ==========================================
 def run_api_sheet_audit(api_sheet):
-    print("🔄 Đang kiểm tra danh sách Custom Search API Keys...")
-    all_rows = api_sheet.get_all_values()
-    keys_to_check = []
-    for i, row in enumerate(all_rows[3:]):
-        row_number = i + 4
-        if row and row[0].strip():
-            keys_to_check.append({"row": row_number, "key": row[0].strip()})
+    print("🔄 Đang kiểm tra danh sách Custom Search API Keys...")
+    all_rows = api_sheet.get_all_values()
+    keys_to_check = []
+    for i, row in enumerate(all_rows[3:]):
+        row_number = i + 4
+        if row and row[0].strip():
+            keys_to_check.append({"row": row_number, "key": row[0].strip()})
 
-    for item in keys_to_check:
-        row_num = item["row"]
-        api_key = item["key"]
-        test_url = f"https://www.googleapis.com/customsearch/v1?q=test&key={api_key}&cx={CX_LINKEDIN}"
-        
-        status_msg = ""
-        bg_color = {"red": 1.0, "green": 1.0, "blue": 1.0}
+    for item in keys_to_check:
+        row_num = item["row"]
+        api_key = item["key"]
+        test_url = f"https://www.googleapis.com/customsearch/v1?q=test&key={api_key}&cx={CX_LINKEDIN}"
 
-        try:
-            res = requests.get(test_url, timeout=10)
-            data = res.json()
-            if res.status_code == 200:
-                status_msg = ""
-                bg_color = {"red": 0.85, "green": 0.93, "blue": 0.83}
-            elif res.status_code == 401 or "API_KEY_INVALID" in str(data):
-                status_msg = "Key loi (401)"
-                bg_color = {"red": 0.97, "green": 0.83, "blue": 0.12}
-            elif res.status_code in [403, 429] or "dailyLimitExceeded" in str(data) or "RESOURCE_EXHAUSTED" in str(data):
-                status_msg = "API het luot"
-                bg_color = {"red": 1.0, "green": 0.7, "blue": 0.7}
-            else:
-                status_msg = f"Loi {res.status_code}"
-        except Exception as e:
-            status_msg = "Conn Error"
+        status_msg = ""
+        bg_color = {"red": 1.0, "green": 1.0, "blue": 1.0}
 
-        try:
-            api_sheet.update(range_name=f"B{row_num}", values=[[status_msg]])
-            api_sheet.format(f"A{row_num}", {"backgroundColor": bg_color})
-        except Exception:
-            pass
-        time.sleep(CHECK_DELAY)
+        try:
+            res = requests.get(test_url, timeout=10)
+            data = res.json()
+            if res.status_code == 200:
+                status_msg = ""
+                bg_color = {"red": 0.85, "green": 0.93, "blue": 0.83}
+            elif res.status_code == 401 or "API_KEY_INVALID" in str(data):
+                status_msg = "Key loi (401)"
+                bg_color = {"red": 0.97, "green": 0.83, "blue": 0.12}
+            elif res.status_code in [403, 429] or "dailyLimitExceeded" in str(data) or "RESOURCE_EXHAUSTED" in str(data):
+                status_msg = "API het luot"
+                bg_color = {"red": 1.0, "green": 0.7, "blue": 0.7}
+            else:
+                status_msg = f"Loi {res.status_code}"
+        except Exception as e:
+            status_msg = "Conn Error"
+
+        try:
+            api_sheet.update(range_name=f"B{row_num}", values=[[status_msg]])
+            api_sheet.format(f"A{row_num}", {"backgroundColor": bg_color})
+        except Exception:
+            pass
+        time.sleep(CHECK_DELAY)
 
 # ==========================================
 # HÀM AI XÁC MINH & TRA CỨU
 # ==========================================
 def verify_ceo_with_ai(company_name, name, job, url, gemini_mgr):
-    prompt = f"""Nhiệm vụ: Xác minh xem người này có phải là CEO hoặc Founder của công ty không, đồng thời chuẩn hóa lại chức vụ.
+    prompt = f"""Nhiệm vụ: Xác minh xem người này có phải là CEO hoặc Founder của công ty không, đồng thời chuẩn hóa lại chức vụ.
 
 Công ty cần tìm: {company_name}
 Người tìm thấy: {name}
@@ -169,280 +169,262 @@ LinkedIn URL: {url}
 Trả lời ĐÚNG format JSON sau, không giải thích thêm:
 {{"verified": true/false, "confidence": "cao/trung bình/thấp", "reason": "lý do ngắn gọn trong 1 câu", "job_title": "chức vụ đã được chuẩn hóa"}}"""
 
-    attempt = 0
-    backoff = 5
-    while attempt < 8:
-        attempt += 1
-        if not gemini_mgr.current_key():
-            return {"verified": None, "confidence": "không xác định", "reason": "Hết key AI", "job_title": job}
+    attempt = 0
+    backoff = 5
+    while attempt < 8:
+        attempt += 1
+        if not gemini_mgr.current_key():
+            return {"verified": None, "confidence": "không xác định", "reason": "Hết key AI", "job_title": job}
 
-        try:
-            client = gemini_mgr.get_client()
-            response = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
-            text = response.text.strip()
-            match = re.search(r'\{.*?\}', text, re.DOTALL)
-            if match:
-                result = json.loads(match.group())
-                if not result.get("job_title"):
-                    result["job_title"] = job
-                return result
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                gemini_mgr.exhaust()
-                continue
-            if "401" in err_str or "API_KEY_INVALID" in err_str:
-                gemini_mgr.invalidate()
-                continue
-            if "503" in err_str or "UNAVAILABLE" in err_str:
-                time.sleep(backoff + random.uniform(0, 4))
-                backoff = min(backoff * 2, 90)
-                continue
-            break
-    return {"verified": None, "confidence": "không xác định", "reason": "Lỗi AI", "job_title": job}
+        try:
+            client = gemini_mgr.get_client()
+            response = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
+            text = response.text.strip()
+            match = re.search(r'\{.*?\}', text, re.DOTALL)
+            if match:
+                result = json.loads(match.group())
+                if not result.get("job_title"):
+                    result["job_title"] = job
+                return result
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                gemini_mgr.exhaust()
+                continue
+            if "401" in err_str or "API_KEY_INVALID" in err_str:
+                gemini_mgr.invalidate()
+                continue
+            if "503" in err_str or "UNAVAILABLE" in err_str:
+                time.sleep(backoff + random.uniform(0, 4))
+                backoff = min(backoff * 2, 90)
+                continue
+            break
+    return {"verified": None, "confidence": "không xác định", "reason": "Lỗi AI", "job_title": job}
 
 def get_location_gemini(ceo_name, company, linkedin_url, gemini_mgr):
-    prompt = (
-        f"What city and state/country does '{ceo_name}', "
-        f"the CEO/Founder of '{company}' (LinkedIn: {linkedin_url}), "
-        f"currently live in or work from? "
-        f"Reply with ONLY city and state/country, example: 'San Francisco, CA'. "
-        f"If unknown, reply '-'."
-    )
-    attempt = 0
-    backoff = 5
-    while attempt < 10:
-        attempt += 1
-        if not gemini_mgr.current_key():
-            return "Hết key AI"
+    prompt = (
+        f"What city and state/country does '{ceo_name}', "
+        f"the CEO/Founder of '{company}' (LinkedIn: {linkedin_url}), "
+        f"currently live in or work from? "
+        f"Reply with ONLY city and state/country, example: 'San Francisco, CA'. "
+        f"If unknown, reply '-'."
+    )
+    attempt = 0
+    backoff = 5
+    while attempt < 10:
+        attempt += 1
+        if not gemini_mgr.current_key():
+            return "Hết key AI"
 
-        try:
-            client = gemini_mgr.get_client()
-            response = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
-            return response.text.strip() if response.text else "-"
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                gemini_mgr.exhaust()
-                continue
-            if "401" in err_str or "API_KEY_INVALID" in err_str:
-                gemini_mgr.invalidate()
-                continue
-            if "503" in err_str or "UNAVAILABLE" in err_str:
-                time.sleep(backoff + random.uniform(0, 5))
-                backoff = min(backoff * 2, 90)
-                continue
-            break
-    return "Error"
+        try:
+            client = gemini_mgr.get_client()
+            response = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
+            return response.text.strip() if response.text else "-"
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                gemini_mgr.exhaust()
+                continue
+            if "401" in err_str or "API_KEY_INVALID" in err_str:
+                gemini_mgr.invalidate()
+                continue
+            if "503" in err_str or "UNAVAILABLE" in err_str:
+                time.sleep(backoff + random.uniform(0, 5))
+                backoff = min(backoff * 2, 90)
+                continue
+            break
+    return "Error"
 
 def get_company_location_gemini(company, gemini_mgr):
-    prompt = (
-        f"Where is the global headquarters of the company '{company}' located? "
-        f"Reply with ONLY City, State/Country (e.g. 'Austin, TX' or 'London, UK'). "
-        f"If unknown, reply '-'."
-    )
-    attempt = 0
-    while attempt < 5:
-        attempt += 1
-        if not gemini_mgr.current_key():
-            return "Hết key AI"
-        try:
-            client = gemini_mgr.get_client()
-            response = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
-            return response.text.strip() if response.text else "-"
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                gemini_mgr.exhaust()
-                continue
-            if "401" in err_str or "API_KEY_INVALID" in err_str:
-                gemini_mgr.invalidate()
-                continue
-            time.sleep(5)
-    return "Error"
+    """Hàm bổ sung: Tra cứu trụ sở chính của công ty (Company HQ Location)"""
+    prompt = (
+        f"Where is the global headquarters of the company '{company}' located? "
+        f"Reply with ONLY City, State/Country (e.g. 'Austin, TX' or 'London, UK'). "
+        f"If unknown, reply '-'."
+    )
+    attempt = 0
+    while attempt < 5:
+        attempt += 1
+        if not gemini_mgr.current_key():
+            return "Hết key AI"
+        try:
+            client = gemini_mgr.get_client()
+            response = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
+            return response.text.strip() if response.text else "-"
+        except Exception as e:
+            err_str = str(e)
+            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                gemini_mgr.exhaust()
+                continue
+            if "401" in err_str or "API_KEY_INVALID" in err_str:
+                gemini_mgr.invalidate()
+                continue
+            time.sleep(5)
+    return "Error"
 
 def is_high_confidence(status_text):
-    if not status_text:
-        return False
-    text = status_text.strip().lower()
-    return ("xác nhận" in text and "không xác nhận" not in text) and "(cao)" in text
+    if not status_text:
+        return False
+    text = status_text.strip().lower()
+    return ("xác nhận" in text and "không xác nhận" not in text) and "(cao)" in text
 
 # ==========================================
 # MAIN AUTOMATION WORKFLOW
 # ==========================================
 def run_automation_logic():
-    print("🚀 Cronjob Triggered: Bắt đầu tiến trình tự động...")
-    try:
-        gc = get_gspread_client()
-        gemini_sheet = gc.open_by_key(API_KEY_SHEET_ID).worksheet("Gemini API")
-        api_sheet = gc.open_by_key(API_KEY_SHEET_ID).worksheet("Custom Search API")
-        data_sheet = gc.open_by_key(DATA_SHEET_ID).worksheet("search example")
+    print("🚀 Cronjob Triggered: Bắt đầu tiến trình tự động...")
+    try:
+        gc = get_gspread_client()
+        gemini_sheet = gc.open_by_key(API_KEY_SHEET_ID).worksheet("Gemini API")
+        api_sheet = gc.open_by_key(API_KEY_SHEET_ID).worksheet("Custom Search API")
+        data_sheet = gc.open_by_key(DATA_SHEET_ID).worksheet("search example")
 
-        # 0. AUDIT DẠO API KEYS
-        run_api_sheet_audit(api_sheet)
+        # 0. AUDIT DẠO API KEYS
+        run_api_sheet_audit(api_sheet)
 
-        # Nạp Key Managers
-        search_key_mgr = MultiTabKeyManager(api_sheet, "SEARCH")
-        search_key_mgr.load()
+        # Nạp Key Managers
+        search_key_mgr = MultiTabKeyManager(api_sheet, "SEARCH")
+        search_key_mgr.load()
 
-        gemini_key_mgr = MultiTabKeyManager(gemini_sheet, "GEMINI")
-        gemini_key_mgr.load()
+        gemini_key_mgr = MultiTabKeyManager(gemini_sheet, "GEMINI")
+        gemini_key_mgr.load()
 
-        # 1. BƯỚC 1: QUÉT TÌM CEO PROFILE (CỘT B:F TRỐNG)
-        print("\n⏳ [PHẦN 1] Kiểm tra danh sách tìm CEO Profile...")
-        data_matrix = data_sheet.get_all_values()
-        rows = data_matrix[1:]
+        # 1. BƯỚC 1: QUÉT TÌM CEO PROFILE (CỘT B:F TRỐNG)
+        print("\n⏳ [PHẦN 1] Kiểm tra danh sách tìm CEO Profile...")
+        data_matrix = data_sheet.get_all_values()
+        rows = data_matrix[1:]
 
-        todo_search = []
-        for i, row in enumerate(rows):
-            company = row[0].strip() if len(row) > 0 else ""
-            col_e = row[4].strip() if len(row) > 4 else ""
-            col_f = row[5].strip() if len(row) > 5 else ""
+        todo_search = []
+        for i, row in enumerate(rows):
+            company = row[0].strip() if len(row) > 0 else ""
+            col_e = row[4].strip() if len(row) > 4 else ""
+            col_f = row[5].strip() if len(row) > 5 else ""
 
-            # Chỉ lấy các dòng có tên công ty VÀ Cột E, F còn trống
-            if company and col_e == "" and col_f == "":
-                todo_search.append({"idx": i + 2, "name": company})
+            # Chỉ chạy khi Cột A có tên công ty VÀ Cột E, F còn trống
+            if company and col_e == "" and col_f == "":
+                todo_search.append({"idx": i + 2, "name": company})
 
-        # CẮT DÂN SÁCH THEO BATCH_SIZE (Giới hạn tối đa 15 dòng/lần chạy)
-        todo_search_batch = todo_search[:BATCH_SIZE]
+        if todo_search:
+            print(f"🚀 Xử lý {len(todo_search)} dòng cần tìm CEO Profile...")
+            for task in todo_search:
 
-        if todo_search_batch:
-            print(f"🚀 Xử lý đợt này {len(todo_search_batch)}/{len(todo_search)} dòng cần tìm CEO Profile...")
-            for task in todo_search_batch:
-                row_idx = task["idx"]
-                company_query = task["name"]
 
-                while True:
-                    api_obj = search_key_mgr.current()
-                    if not api_obj:
-                        print("🛑 HẾT KEY SEARCH KHẢ DỤNG!")
-                        break
 
-                    api_key = api_obj['key']
-                    query = f'"{company_query}" (CEO OR Founder) site:linkedin.com/in/'
-                    url = f"https://www.googleapis.com/customsearch/v1?q={urllib.parse.quote(query)}&key={api_key}&cx={CX_LINKEDIN}"
+                row_idx = task["idx"]
+                company_query = task["name"]
 
-                    try:
-                        res = requests.get(url, timeout=10)
-                        data = res.json()
+                while True:
+                    api_obj = search_key_mgr.current()
+                    if not api_obj:
+                        print("🛑 HẾT KEY SEARCH KHẢ DỤNG!")
+                        break
 
-                        if res.status_code in [403, 429] or "dailyLimitExceeded" in str(data):
-                            search_key_mgr.exhaust()
-                            continue
-                        if res.status_code == 401:
-                            search_key_mgr.invalidate()
-                            continue
+                    api_key = api_obj['key']
+                    query = f'"{company_query}" (CEO OR Founder) site:linkedin.com/in/'
+                    url = f"https://www.googleapis.com/customsearch/v1?q={urllib.parse.quote(query)}&key={api_key}&cx={CX_LINKEDIN}"
 
-                        items = data.get("items", [])
-                        if items:
-                            item = items[0]
-                            link = item.get("link", "-")
-                            full_title = item.get("title", "")
-                            clean_title = full_title.split("|")[0].split("...")[0].strip()
-                            parts = [p.strip() for p in clean_title.split("-")]
-                            name = parts[0] if len(parts) > 0 else "-"
-                            job_raw = " - ".join(parts[1:]) if len(parts) > 1 else "-"
+                    try:
+                        res = requests.get(url, timeout=10)
+                        data = res.json()
 
-                            ai_result = verify_ceo_with_ai(company_query, name, job_raw, link, gemini_key_mgr)
+                        if res.status_code in [403, 429] or "dailyLimitExceeded" in str(data):
+                            search_key_mgr.exhaust()
+                            continue
+                        if res.status_code == 401:
+                            search_key_mgr.invalidate()
+                            continue
 
-                            ai_status = "✅ Xác nhận" if ai_result.get("verified") is True else ("❌ Không xác nhận" if ai_result.get("verified") is False else "⚠️ Không rõ")
-                            ai_confidence = ai_result.get("confidence", "-")
-                            ai_reason = ai_result.get("reason", "-")
+                        items = data.get("items", [])
+                        if items:
+                            item = items[0]
+                            link = item.get("link", "-")
+                            full_title = item.get("title", "")
+                            clean_title = full_title.split("|")[0].split("...")[0].strip()
+                            parts = [p.strip() for p in clean_title.split("-")]
+                            name = parts[0] if len(parts) > 0 else "-"
+                            job_raw = " - ".join(parts[1:]) if len(parts) > 1 else "-"
 
-                            job_final = ai_result.get("job_title", job_raw) if (ai_result.get("verified") is True and ai_confidence.strip().lower() == "cao") else job_raw
+                            ai_result = verify_ceo_with_ai(company_query, name, job_raw, link, gemini_key_mgr)
 
-                            payload = [link, name, job_final, f"{ai_status} ({ai_confidence})", ai_reason]
-                            data_sheet.update(range_name=f"B{row_idx}:F{row_idx}", values=[payload])
-                            print(f" ✅ [{row_idx}] Updated B:F cho {company_query}")
+                            ai_status = "✅ Xác nhận" if ai_result.get("verified") is True else ("❌ Không xác nhận" if ai_result.get("verified") is False else "⚠️ Không rõ")
+                            ai_confidence = ai_result.get("confidence", "-")
+                            ai_reason = ai_result.get("reason", "-")
 
-                        else:
-                            data_sheet.update(range_name=f"B{row_idx}", values=[["- Không tìm thấy"]])
-                            print(f" ➖ [{row_idx}] Không có kết quả cho {company_query}.")
+                            job_final = ai_result.get("job_title", job_raw) if (ai_result.get("verified") is True and ai_confidence.strip().lower() == "cao") else job_raw
 
-                        sleep_with_jitter()
-                        break
+                            payload = [link, name, job_final, f"{ai_status} ({ai_confidence})", ai_reason]
+                            data_sheet.update(range_name=f"B{row_idx}:F{row_idx}", values=[payload])
+                            print(f" ✅ [{row_idx}] Updated B:F cho {company_query}")
 
-                    except Exception as e:
-                        print(f"❌ Lỗi xử lý dòng {row_idx}: {e}")
-                        break
-        else:
-            print("✅ Không có dòng nào trống ở phần CEO Profile (Cột B:F).")
+                        else:
+                            data_sheet.update(range_name=f"B{row_idx}", values=[["- Không tìm thấy"]])
+                            print(f" ➖ [{row_idx}] Không có kết quả cho {company_query}.")
 
-        # 2. BƯỚC 2: QUÉT TÌM VỊ TRÍ CEO (CỘT G TRỐNG & CONFIDENCE CAO)
-        print("\n⏳ [PHẦN 2] Kiểm tra Vị trí CEO (Cột G)...")
-        all_rows_updated = data_sheet.get_all_values()
-        
-        todo_location = []
-        for i, row in enumerate(all_rows_updated[1:]):
-            row_idx = i + 2
-            company = row[0].strip() if len(row) > 0 else ""
-            linkedin_url = row[1].strip() if len(row) > 1 else ""
-            ceo_name = row[2].strip() if len(row) > 2 else ""
-            confidence_status = row[4].strip() if len(row) > 4 else ""
-            location_filled = len(row) > 6 and row[6].strip()
+                        sleep_with_jitter()
+                        break
 
-            if is_high_confidence(confidence_status) and not location_filled:
-                todo_location.append({
-                    "row_idx": row_idx,
-                    "company": company,
-                    "linkedin_url": linkedin_url,
-                    "ceo_name": ceo_name
-                })
+                    except Exception as e:
+                        print(f"❌ Lỗi xử lý dòng {row_idx}: {e}")
+                        break
+        else:
+            print("✅ Không có dòng nào trống ở phần CEO Profile (Cột B:F).")
 
-        # CẮT DANH SÁCH LOCATION THEO BATCH
-        todo_location_batch = todo_location[:BATCH_SIZE]
-        for item in todo_location_batch:
-            row_idx = item["row_idx"]
-            if not item["ceo_name"]:
-                data_sheet.update(range_name=f"G{row_idx}", values=[["-"]])
-                continue
+        # 2. BƯỚC 2: QUÉT TÌM VỊ TRÍ CEO (CỘT G TRỐNG & CONFIDENCE CAO)
+        print("\n⏳ [PHẦN 2] Kiểm tra Vị trí CEO (Cột G)...")
+        all_rows_updated = data_sheet.get_all_values()
 
-            location = get_location_gemini(item["ceo_name"], item["company"], item["linkedin_url"], gemini_key_mgr)
-            data_sheet.update(range_name=f"G{row_idx}", values=[[location]])
-            print(f" 📍 [{row_idx}] Updated CEO Location (G): {location}")
-            sleep_with_jitter()
 
-        # 3. BƯỚC 3: QUÉT TÌM VỊ TRÍ CÔNG TY (CỘT H TRỐNG)
-        print("\n⏳ [PHẦN 3] Kiểm tra Vị trí Công ty / HQ Location (Cột H)...")
-        all_rows_latest = data_sheet.get_all_values()
-        
-        todo_hq = []
-        for i, row in enumerate(all_rows_latest[1:]):
-            row_idx = i + 2
-            company = row[0].strip() if len(row) > 0 else ""
-            comp_loc_filled = len(row) > 7 and row[7].strip()
+        for i, row in enumerate(all_rows_updated[1:]):
+            row_idx = i + 2
+            company = row[0].strip() if len(row) > 0 else ""
+            linkedin_url = row[1].strip() if len(row) > 1 else ""
+            ceo_name = row[2].strip() if len(row) > 2 else ""
+            confidence_status = row[4].strip() if len(row) > 4 else ""
+            location_filled = len(row) > 6 and row[6].strip()
 
-            if company and not comp_loc_filled:
-                todo_hq.append({"row_idx": row_idx, "company": company})
+            if is_high_confidence(confidence_status) and not location_filled:
+                if not ceo_name:
+                    data_sheet.update(range_name=f"G{row_idx}", values=[["-"]])
+                    continue
 
-        # CẮT DANH SÁCH HQ THEO BATCH
-        todo_hq_batch = todo_hq[:BATCH_SIZE]
-        for item in todo_hq_batch:
-            row_idx = item["row_idx"]
-            comp_location = get_company_location_gemini(item["company"], gemini_key_mgr)
-            data_sheet.update(range_name=f"H{row_idx}", values=[[comp_location]])
-            print(f" 🏢 [{row_idx}] Updated Company HQ Location (H): {comp_location}")
-            sleep_with_jitter()
+                location = get_location_gemini(ceo_name, company, linkedin_url, gemini_key_mgr)
+                data_sheet.update(range_name=f"G{row_idx}", values=[[location]])
+                print(f" 📍 [{row_idx}] Updated CEO Location (G): {location}")
+                sleep_with_jitter()
 
-        print("\n🏁 HOÀN THÀNH ĐỢT XỬ LÝ AUTOMATION BATCH.")
+        # 3. BƯỚC 3: QUÉT TÌM VỊ TRÍ CÔNG TY (CỘT H TRỐNG - COMPANY LOCATION)
+        print("\n⏳ [PHẦN 3] Kiểm tra Vị trí Công ty / HQ Location (Cột H)...")
+        all_rows_latest = data_sheet.get_all_values()
 
-    except Exception as general_err:
-        print(f"❌ Tiến trình gặp lỗi nghiêm trọng: {general_err}")
+
+        for i, row in enumerate(all_rows_latest[1:]):
+            row_idx = i + 2
+            company = row[0].strip() if len(row) > 0 else ""
+            comp_loc_filled = len(row) > 7 and row[7].strip()
+
+            if company and not comp_loc_filled:
+                comp_location = get_company_location_gemini(company, gemini_key_mgr)
+                data_sheet.update(range_name=f"H{row_idx}", values=[[comp_location]])
+                print(f" 🏢 [{row_idx}] Updated Company HQ Location (H): {comp_location}")
+                sleep_with_jitter()
+
+        print("\n🏁 HOÀN THÀNH TOÀN BỘ TIẾN TRÌNH AUTOMATION.")
+
+    except Exception as general_err:
+        print(f"❌ Tiến trình gặp lỗi nghiêm trọng: {general_err}")
 
 # ==========================================
 # ENDPOINT FASTAPI FOR CRON-JOB.ORG
 # ==========================================
 @app.get("/")
 def home():
-    return JSONResponse(content={"status": "Service is running!"}, status_code=200)
+    return {"status": "Service is running!"}
 
 @app.get("/run-job")
 def trigger_job(background_tasks: BackgroundTasks, token: str = ""):
-    if token != SECRET_TOKEN:
-        raise HTTPException(status_code=403, detail="Unauthorized")
+    if token != SECRET_TOKEN:
+        raise HTTPException(status_code=403, detail="Unauthorized")
 
-    # Kích hoạt task chạy nền ngầm
-    background_tasks.add_task(run_automation_logic)
-    
-    # Trả về JSONResponse tối giản siêu nhẹ ngay lập tức cho cron-job.org
-    return JSONResponse(content={"status": "ok", "message": "Job queued successfully"}, status_code=200)
+
+    background_tasks.add_task(run_automation_logic)
+    return {"message": "Job successfully triggered in background!"}
