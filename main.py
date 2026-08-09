@@ -20,7 +20,7 @@ CX_LINKEDIN = "a6be6e8ccdb58403b"
 SECRET_TOKEN = "MySuperSecretToken123"  # Token xác thực khi gọi API từ bên ngoài
 
 # Giới hạn số lượng dòng xử lý tối đa trong 1 lượt Cronjob để tiết kiệm Quota API
-MAX_BATCH_SIZE = 5
+MAX_BATCH_SIZE = 10
 
 CHECK_DELAY = 0.5
 SEARCH_DELAY = 2.0
