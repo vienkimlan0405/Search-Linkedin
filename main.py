@@ -17,12 +17,15 @@ app = FastAPI()
 API_KEY_SHEET_ID = "1wzgeUWKlXe-QU-rDZLaLjIQxeXreNvbm3Fi88UZjXWM"
 DATA_SHEET_ID = "1YrgKGSUsPTBMxm39qeM8QRxalhfLQD3Zg8gozx6KTgM"
 CX_LINKEDIN = "a6be6e8ccdb58403b"
-SECRET_TOKEN = "MySuperSecretToken123"  # Token xác thực khi gọi API từ cron-job.org
+SECRET_TOKEN = "MySuperSecretToken123"  # Token xác thực khi gọi API từ bên ngoài
+
+# Giới hạn số lượng dòng xử lý tối đa trong 1 lượt Cronjob để tiết kiệm Quota API
+MAX_BATCH_SIZE = 5
 
 CHECK_DELAY = 0.5
-SEARCH_DELAY = 1.5
-GEMINI_DELAY_BASE = 6.0
-GEMINI_DELAY_JITTER = 2.5
+SEARCH_DELAY = 2.0
+GEMINI_DELAY_BASE = 5.0
+GEMINI_DELAY_JITTER = 2.0
 
 def sleep_with_jitter(base=GEMINI_DELAY_BASE, jitter=GEMINI_DELAY_JITTER):
     time.sleep(base + random.uniform(0, jitter))
@@ -135,7 +138,7 @@ def run_api_sheet_audit(api_sheet):
                 bg_color = {"red": 1.0, "green": 0.7, "blue": 0.7}
             else:
                 status_msg = f"Loi {res.status_code}"
-        except Exception as e:
+        except Exception:
             status_msg = "Conn Error"
 
         try:
@@ -167,7 +170,7 @@ Trả lời ĐÚNG format JSON sau, không giải thích thêm:
 
     attempt = 0
     backoff = 5
-    while attempt < 8:
+    while attempt < 5:
         attempt += 1
         if not gemini_mgr.current_key():
             return {"verified": None, "confidence": "không xác định", "reason": "Hết key AI", "job_title": job}
@@ -207,7 +210,7 @@ def get_location_gemini(ceo_name, company, linkedin_url, gemini_mgr):
     )
     attempt = 0
     backoff = 5
-    while attempt < 10:
+    while attempt < 5:
         attempt += 1
         if not gemini_mgr.current_key():
             return "Hết key AI"
@@ -275,7 +278,7 @@ def run_automation_logic():
         api_sheet = gc.open_by_key(API_KEY_SHEET_ID).worksheet("Custom Search API")
         data_sheet = gc.open_by_key(DATA_SHEET_ID).worksheet("search example")
 
-        # 0. AUDIT DẠO API KEYS
+        # 0. AUDIT API KEYS
         run_api_sheet_audit(api_sheet)
 
         # Nạp Key Managers
@@ -296,9 +299,11 @@ def run_automation_logic():
             col_e = row[4].strip() if len(row) > 4 else ""
             col_f = row[5].strip() if len(row) > 5 else ""
 
-            # Chỉ chạy khi Cột A có tên công ty VÀ Cột E, F còn trống
+            # Chỉ chọn dòng có tên công ty VÀ các cột E, F còn trống
             if company and col_e == "" and col_f == "":
                 todo_search.append({"idx": i + 2, "name": company})
+                if len(todo_search) >= MAX_BATCH_SIZE:
+                    break  # Giới hạn số lượng dòng xử lý mỗi đợt để tiết kiệm quota
 
         if todo_search:
             print(f"🚀 Xử lý {len(todo_search)} dòng cần tìm CEO Profile...")
@@ -365,8 +370,11 @@ def run_automation_logic():
         # 2. BƯỚC 2: QUÉT TÌM VỊ TRÍ CEO (CỘT G TRỐNG & CONFIDENCE CAO)
         print("\n⏳ [PHẦN 2] Kiểm tra Vị trí CEO (Cột G)...")
         all_rows_updated = data_sheet.get_all_values()
+        count_g = 0
 
         for i, row in enumerate(all_rows_updated[1:]):
+            if count_g >= MAX_BATCH_SIZE:
+                break
             row_idx = i + 2
             company = row[0].strip() if len(row) > 0 else ""
             linkedin_url = row[1].strip() if len(row) > 1 else ""
@@ -382,13 +390,17 @@ def run_automation_logic():
                 location = get_location_gemini(ceo_name, company, linkedin_url, gemini_key_mgr)
                 data_sheet.update(range_name=f"G{row_idx}", values=[[location]])
                 print(f" 📍 [{row_idx}] Updated CEO Location (G): {location}")
+                count_g += 1
                 sleep_with_jitter()
 
         # 3. BƯỚC 3: QUÉT TÌM VỊ TRÍ CÔNG TY (CỘT H TRỐNG - COMPANY LOCATION)
         print("\n⏳ [PHẦN 3] Kiểm tra Vị trí Công ty / HQ Location (Cột H)...")
         all_rows_latest = data_sheet.get_all_values()
+        count_h = 0
 
         for i, row in enumerate(all_rows_latest[1:]):
+            if count_h >= MAX_BATCH_SIZE:
+                break
             row_idx = i + 2
             company = row[0].strip() if len(row) > 0 else ""
             comp_loc_filled = len(row) > 7 and row[7].strip()
@@ -397,6 +409,7 @@ def run_automation_logic():
                 comp_location = get_company_location_gemini(company, gemini_key_mgr)
                 data_sheet.update(range_name=f"H{row_idx}", values=[[comp_location]])
                 print(f" 🏢 [{row_idx}] Updated Company HQ Location (H): {comp_location}")
+                count_h += 1
                 sleep_with_jitter()
 
         print("\n🏁 HOÀN THÀNH TOÀN BỘ TIẾN TRÌNH AUTOMATION.")
@@ -419,6 +432,6 @@ def trigger_job(background_tasks: BackgroundTasks, token: str = ""):
     background_tasks.add_task(run_automation_logic)
     return {"message": "Job successfully triggered in background!"}
 
-# Cho phép chạy trực tiếp từ Terminal / GitHub Actions bằng lệnh: python main.py
+# Thực thi trực tiếp khi chạy qua lệnh python main.py
 if __name__ == "__main__":
     run_automation_logic()
