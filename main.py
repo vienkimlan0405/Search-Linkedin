@@ -234,33 +234,6 @@ def get_location_gemini(ceo_name, company, linkedin_url, gemini_mgr):
             break
     return "Error"
 
-def get_company_location_gemini(company, gemini_mgr):
-    """Hàm bổ sung: Tra cứu trụ sở chính của công ty (Company HQ Location)"""
-    prompt = (
-        f"Where is the global headquarters of the company '{company}' located? "
-        f"Reply with ONLY City, State/Country (e.g. 'Austin, TX' or 'London, UK'). "
-        f"If unknown, reply '-'."
-    )
-    attempt = 0
-    while attempt < 5:
-        attempt += 1
-        if not gemini_mgr.current_key():
-            return "Hết key AI"
-        try:
-            client = gemini_mgr.get_client()
-            response = client.models.generate_content(model="gemini-flash-latest", contents=prompt)
-            return response.text.strip() if response.text else "-"
-        except Exception as e:
-            err_str = str(e)
-            if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                gemini_mgr.exhaust()
-                continue
-            if "401" in err_str or "API_KEY_INVALID" in err_str:
-                gemini_mgr.invalidate()
-                continue
-            time.sleep(5)
-    return "Error"
-
 def is_high_confidence(status_text):
     if not status_text:
         return False
@@ -268,7 +241,7 @@ def is_high_confidence(status_text):
     return ("xác nhận" in text and "không xác nhận" not in text) and "(cao)" in text
 
 # ==========================================
-# MAIN AUTOMATION WORKFLOW
+# MAIN AUTOMATION WORKFLOW (CHỈ XỬ LÝ A -> G)
 # ==========================================
 def run_automation_logic():
     print("🚀 Cronjob Triggered: Bắt đầu tiến trình tự động...")
@@ -393,26 +366,7 @@ def run_automation_logic():
                 count_g += 1
                 sleep_with_jitter()
 
-        # 3. BƯỚC 3: QUÉT TÌM VỊ TRÍ CÔNG TY (CỘT H TRỐNG - COMPANY LOCATION)
-        print("\n⏳ [PHẦN 3] Kiểm tra Vị trí Công ty / HQ Location (Cột H)...")
-        all_rows_latest = data_sheet.get_all_values()
-        count_h = 0
-
-        for i, row in enumerate(all_rows_latest[1:]):
-            if count_h >= MAX_BATCH_SIZE:
-                break
-            row_idx = i + 2
-            company = row[0].strip() if len(row) > 0 else ""
-            comp_loc_filled = len(row) > 7 and row[7].strip()
-
-            if company and not comp_loc_filled:
-                comp_location = get_company_location_gemini(company, gemini_key_mgr)
-                data_sheet.update(range_name=f"H{row_idx}", values=[[comp_location]])
-                print(f" 🏢 [{row_idx}] Updated Company HQ Location (H): {comp_location}")
-                count_h += 1
-                sleep_with_jitter()
-
-        print("\n🏁 HOÀN THÀNH TOÀN BỘ TIẾN TRÌNH AUTOMATION.")
+        print("\n🏁 HOÀN THÀNH TOÀN BỘ TIẾN TRÌNH AUTOMATION (A -> G).")
 
     except Exception as general_err:
         print(f"❌ Tiến trình gặp lỗi nghiêm trọng: {general_err}")
