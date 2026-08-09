@@ -17,9 +17,8 @@ app = FastAPI()
 API_KEY_SHEET_ID = "1wzgeUWKlXe-QU-rDZLaLjIQxeXreNvbm3Fi88UZjXWM"
 DATA_SHEET_ID = "1YrgKGSUsPTBMxm39qeM8QRxalhfLQD3Zg8gozx6KTgM"
 CX_LINKEDIN = "a6be6e8ccdb58403b"
-SECRET_TOKEN = "MySuperSecretToken123"  # Token xác thực khi gọi API từ bên ngoài
+SECRET_TOKEN = "MySuperSecretToken123"
 
-# Giới hạn số lượng dòng xử lý tối đa trong 1 lượt Cronjob để tiết kiệm Quota API
 MAX_BATCH_SIZE = 10
 
 CHECK_DELAY = 0.5
@@ -31,7 +30,7 @@ def sleep_with_jitter(base=GEMINI_DELAY_BASE, jitter=GEMINI_DELAY_JITTER):
     time.sleep(base + random.uniform(0, jitter))
 
 # ==========================================
-# HÀM KHỞI TẠO GSPREAD TỪ BIẾN MÔI TRƯỜNG
+# HÀM KHỞI TẠO GSPREAD & HELPER RETRY GOOGLE SHEETS
 # ==========================================
 def get_gspread_client():
     service_account_info = os.getenv("SERVICE_ACCOUNT_JSON")
@@ -45,6 +44,22 @@ def get_gspread_client():
     else:
         print("⚠️ Không thấy SERVICE_ACCOUNT_JSON trong môi trường, thử tìm file service_account.json local...")
         return gspread.service_account(filename="service_account.json")
+
+def safe_sheet_update(sheet, range_name, values, max_retries=3):
+    """Hàm ghi Sheet an toàn, tự động đợi nếu bị dính Rate Limit (429) của Google Sheets."""
+    for attempt in range(max_retries):
+        try:
+            sheet.update(range_name=range_name, values=values)
+            return True
+        except Exception as e:
+            if "429" in str(e) or "Quota exceeded" in str(e):
+                wait_sec = (attempt + 1) * 10
+                print(f" ⏳ [Google Sheets 429] Bị giới hạn lượt ghi. Đang đợi {wait_sec} giây...")
+                time.sleep(wait_sec)
+            else:
+                print(f" ⚠️ Lỗi cập nhật Sheet ({range_name}): {e}")
+                break
+    return False
 
 # ==========================================
 # CLASS QUẢN LÝ KEY ROTATION (ĐA TAB)
@@ -96,57 +111,51 @@ class MultiTabKeyManager:
 
     def _mark(self, row, kind):
         msg = "Key loi (401)" if kind == "401" else "API het luot"
-        color = (
-            {"red": 0.97, "green": 0.83, "blue": 0.12} if kind == "401"
-            else {"red": 1.0, "green": 0.7, "blue": 0.7}
-        )
-        self._sheet.update(range_name=f"B{row}", values=[[msg]])
-        self._sheet.format(f"A{row}", {"backgroundColor": color})
+        safe_sheet_update(self._sheet, f"B{row}", [[msg]])
         print(f"🛑 [{self._type}] Hàng {row} đánh dấu: {msg}")
 
 # ==========================================
-# BƯỚC 0: AUDIT DẠO API KEYS (CUSTOM SEARCH)
+# BƯỚC 0: AUDIT DẠO API KEYS (GỘP REQUEST BATCH UPDATE)
 # ==========================================
 def run_api_sheet_audit(api_sheet):
     print("🔄 Đang kiểm tra danh sách Custom Search API Keys...")
     all_rows = api_sheet.get_all_values()
-    keys_to_check = []
+    if len(all_rows) < 4:
+        return
+
+    # Chuẩn bị dữ liệu cập nhật gộp cho B4 trở xuống
+    status_updates = []
+    
     for i, row in enumerate(all_rows[3:]):
-        row_number = i + 4
-        if row and row[0].strip():
-            keys_to_check.append({"row": row_number, "key": row[0].strip()})
+        if not row or not row[0].strip():
+            status_updates.append([""])
+            continue
 
-    for item in keys_to_check:
-        row_num = item["row"]
-        api_key = item["key"]
+        api_key = row[0].strip()
         test_url = f"https://www.googleapis.com/customsearch/v1?q=test&key={api_key}&cx={CX_LINKEDIN}"
-
         status_msg = ""
-        bg_color = {"red": 1.0, "green": 1.0, "blue": 1.0}
 
         try:
             res = requests.get(test_url, timeout=10)
             data = res.json()
             if res.status_code == 200:
                 status_msg = ""
-                bg_color = {"red": 0.85, "green": 0.93, "blue": 0.83}
             elif res.status_code == 401 or "API_KEY_INVALID" in str(data):
                 status_msg = "Key loi (401)"
-                bg_color = {"red": 0.97, "green": 0.83, "blue": 0.12}
             elif res.status_code in [403, 429] or "dailyLimitExceeded" in str(data) or "RESOURCE_EXHAUSTED" in str(data):
                 status_msg = "API het luot"
-                bg_color = {"red": 1.0, "green": 0.7, "blue": 0.7}
             else:
                 status_msg = f"Loi {res.status_code}"
         except Exception:
             status_msg = "Conn Error"
 
-        try:
-            api_sheet.update(range_name=f"B{row_num}", values=[[status_msg]])
-            api_sheet.format(f"A{row_num}", {"backgroundColor": bg_color})
-        except Exception:
-            pass
+        status_updates.append([status_msg])
         time.sleep(CHECK_DELAY)
+
+    # GHI TẤT CẢ TRẠNG THÁI BẰNG CHỈ 1 LỆNH UPDATE DUY NHẤT VÀO CỘT B
+    end_row = 3 + len(status_updates)
+    safe_sheet_update(api_sheet, f"B4:B{end_row}", status_updates)
+    print("✅ Cập nhật trạng thái Audit Keys hoàn tất (1 Batch Write).")
 
 # ==========================================
 # HÀM AI XÁC MINH & TRA CỨU
@@ -251,7 +260,7 @@ def run_automation_logic():
         api_sheet = gc.open_by_key(API_KEY_SHEET_ID).worksheet("Custom Search API")
         data_sheet = gc.open_by_key(DATA_SHEET_ID).worksheet("search example")
 
-        # 0. AUDIT API KEYS
+        # 0. AUDIT API KEYS (Tiết kiệm Quota)
         run_api_sheet_audit(api_sheet)
 
         # Nạp Key Managers
@@ -272,11 +281,10 @@ def run_automation_logic():
             col_e = row[4].strip() if len(row) > 4 else ""
             col_f = row[5].strip() if len(row) > 5 else ""
 
-            # Chỉ chọn dòng có tên công ty VÀ các cột E, F còn trống
             if company and col_e == "" and col_f == "":
                 todo_search.append({"idx": i + 2, "name": company})
                 if len(todo_search) >= MAX_BATCH_SIZE:
-                    break  # Giới hạn số lượng dòng xử lý mỗi đợt để tiết kiệm quota
+                    break
 
         if todo_search:
             print(f"🚀 Xử lý {len(todo_search)} dòng cần tìm CEO Profile...")
@@ -324,11 +332,11 @@ def run_automation_logic():
                             job_final = ai_result.get("job_title", job_raw) if (ai_result.get("verified") is True and ai_confidence.strip().lower() == "cao") else job_raw
 
                             payload = [link, name, job_final, f"{ai_status} ({ai_confidence})", ai_reason]
-                            data_sheet.update(range_name=f"B{row_idx}:F{row_idx}", values=[payload])
+                            safe_sheet_update(data_sheet, f"B{row_idx}:F{row_idx}", [payload])
                             print(f" ✅ [{row_idx}] Updated B:F cho {company_query}")
 
                         else:
-                            data_sheet.update(range_name=f"B{row_idx}", values=[["- Không tìm thấy"]])
+                            safe_sheet_update(data_sheet, f"B{row_idx}", [["- Không tìm thấy"]])
                             print(f" ➖ [{row_idx}] Không có kết quả cho {company_query}.")
 
                         sleep_with_jitter()
@@ -339,6 +347,9 @@ def run_automation_logic():
                         break
         else:
             print("✅ Không có dòng nào trống ở phần CEO Profile (Cột B:F).")
+
+        # Đợi 3 giây trước khi chuyển sang PHẦN 2 để làm rỗng Quota Rate Limit
+        time.sleep(3)
 
         # 2. BƯỚC 2: QUÉT TÌM VỊ TRÍ CEO (CỘT G TRỐNG & CONFIDENCE CAO)
         print("\n⏳ [PHẦN 2] Kiểm tra Vị trí CEO (Cột G)...")
@@ -357,11 +368,11 @@ def run_automation_logic():
 
             if is_high_confidence(confidence_status) and not location_filled:
                 if not ceo_name:
-                    data_sheet.update(range_name=f"G{row_idx}", values=[["-"]])
+                    safe_sheet_update(data_sheet, f"G{row_idx}", [["-"]])
                     continue
 
                 location = get_location_gemini(ceo_name, company, linkedin_url, gemini_key_mgr)
-                data_sheet.update(range_name=f"G{row_idx}", values=[[location]])
+                safe_sheet_update(data_sheet, f"G{row_idx}", [[location]])
                 print(f" 📍 [{row_idx}] Updated CEO Location (G): {location}")
                 count_g += 1
                 sleep_with_jitter()
@@ -386,6 +397,5 @@ def trigger_job(background_tasks: BackgroundTasks, token: str = ""):
     background_tasks.add_task(run_automation_logic)
     return {"message": "Job successfully triggered in background!"}
 
-# Thực thi trực tiếp khi chạy qua lệnh python main.py
 if __name__ == "__main__":
     run_automation_logic()
